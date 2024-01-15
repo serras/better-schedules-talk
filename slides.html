@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Kotlin - Better Schedules</title>
+    <meta charset="utf-8">
+    <style>
+      /* @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+      @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic); */
+      @import url(css/metropolis.css);
+    </style>
+  </head>
+  <body>
+    <textarea id="source">
+
+class: center, middle, title-slide
+count: false
+
+# **Better `Schedule`s**
+
+## using compositional design patterns
+
+<br />
+
+.less-line-height[
+Alejandro Serrano @ Kotlin Meetup
+
+.grey[🐦 @trupill - 🏠 serranofp.com - 👨‍💻 JetBrains]
+]
+
+---
+
+# 🥅 Goals of this talk
+
+> How we reworked the implementation of `Schedule` in Arrow
+    
+Introduction to **compositional** design patterns
+
+- Functor and Applicative
+- (Free) monad
+
+---
+
+# 🏹 Arrow - `arrow-kt.io`
+    
+Set of libraries for every Kotlin developer <br />
+inspired by functional programming
+ 
+* _Core_: typed errors, non-empty collections
+* _Fx_: high-level concurrency, resources
+* _Resilience_: retries, circuit breakers
+* _Optics_: immutable data transformation
+* _Atomic_ + _STM_: transactional operations
+
+All of them Multiplatform-ready
+
+---
+
+# ⏲️ Schedule
+
+Description of a policy for executing jobs and (potential) delays between them
+
+- To _retry_ until one succeeds
+- To _repeat_ the same job multiple times
+
+Simplest pattern for _resilience_, just try again
+
+---
+    
+# ⏲️ Schedule examples
+
+.code60[
+```kotlin
+// retry a maximum of 10 times
+Schedule.recurs<A>(10)
+
+// retry with exponential back-off
+Schedule.exponential<Unit>(250.milliseconds)
+
+// 1. exponential back-off for 60 seconds
+// 2. at most 100 retries spaces by 60 seconds
+// with some random noise (jitter)
+Schedule.exponential<A>(10.milliseconds)
+    .doWhile { _, duration -> duration < 60.seconds }
+    .andThen(spaced<A>(60.seconds) and recurs(100))
+    .jittered()
+```
+]
+
+---
+
+# ⏲️ Schedule examples
+
+Using a `Schedule` is pretty easy
+
+.code70[
+```kotlin
+Schedule.recurs(10).repeat { downloadFile(url) }
+```
+]
+
+- `retry` repeats if an exception is thrown
+- More variations for custom error conditions
+    
+--
+
+> You can read about that in the docs <br />
+> here we want to talk about the **internals**
+    
+---
+
+# 🛡️ `Schedule<Input, Output>`
+
+.margin-top[
+- `Input` specifies the data you base your decision upon
+- `Output` specifies the result of the action
+]
+
+```kotlin
+recurs(10) : Schedule<A, Int>
+       // iteration count ↲
+
+doWhile(f) : Schedule<A, A>
+      // same value back ↲
+```
+
+---
+
+# 😵‍💫 Complex implementation
+    
+Internal `State` type parameter
+
+<iframe frameborder="0" scrolling="no" style="margin-top: -20px; width:100%; height:163px;" allow="clipboard-write" src="https://emgithub.com/iframe.html?target=https%3A%2F%2Fgithub.com%2Farrow-kt%2Farrow%2Fblob%2Fmain%2Farrow-libs%2Ffx%2Farrow-fx-coroutines%2Fsrc%2FcommonMain%2Fkotlin%2Farrow%2Ffx%2Fcoroutines%2FSchedule.kt%23L568-571&style=atom-one-light&type=code&showBorder=on&showLineNumbers=on&showFileMeta=on&showFullPath=on&showCopy=on"></iframe>
+
+.little-margin-top[
+Unchecked casts
+]
+
+<iframe frameborder="0" scrolling="no" style="margin-top: -20px; width:100%; height:268px;" allow="clipboard-write" src="https://emgithub.com/iframe.html?target=https%3A%2F%2Fgithub.com%2Farrow-kt%2Farrow%2Fblob%2Fmain%2Farrow-libs%2Ffx%2Farrow-fx-coroutines%2Fsrc%2FcommonMain%2Fkotlin%2Farrow%2Ffx%2Fcoroutines%2FSchedule.kt%23L1117-1125&style=atom-one-light&type=code&showBorder=on&showLineNumbers=on&showFileMeta=on&showFullPath=on&showCopy=on"></iframe>
+
+---
+    
+# 😵‍💫 Complex implementation
+
+Internal `State` type parameter
+    
+Unchecked casts
+
+...
+    
+<br />
+    
+> We looked for alternatives for a long time
+
+---
+
+class: center, middle, title-slide
+count: false
+    
+# Compositional design patterns
+    
+---
+
+# 🌱 Functor
+
+This is a pattern over _generic_ types
+
+```kotlin
+fun <A, B> Whatever<A>.map(
+  transform: (A) -> B
+): Whatever<B>
+```
+
+- Transforms each element using `transform`
+- Keeps the shape of the structure<super>*</super>
+
+--
+
+.font60[
+<super>*</super> There is a formal definition of "keeping the shape": `e.map { it } == e`
+]
+
+---
+
+# 🌱 Examples of functor
+
+.margin-top[
+- Iterable types: `List`, `Set`, ...
+]
+
+--
+
+- Map-key values are functors for a fixed key
+
+.code70[
+```kotlin
+fun <K, A> Map<K, B>.mapValues(
+  transform: (A) -> B
+): Map<K, V>
+```
+]
+
+---
+
+# 🌱 Examples of functor
+
+.margin-top[
+- Iterable types: `List`, `Set`, ...
+- Map-key values are functors for a fixed key
+]
+
+- Non-sequential containers
+
+.code60[
+```kotlin
+fun <A, B> BinaryTree<A>.map(
+  transform: (A) -> B
+): BinaryTree<B> = when (this) {
+  is Leaf ->
+    Leaf(transform(value))
+  is Node ->
+    Node(left.map(transform), right.map(transform))
+}
+```
+]
+
+---
+
+# 🌱 Examples of functor
+
+.margin-top[
+- Iterable types: `List`, `Set`, ...
+- Map-key values are functors for a fixed key
+- Non-sequential containers
+]
+
+- Nullable types
+
+.code70[
+```kotlin
+fun <A, B> A?.map(transform: (A) -> B): B? =
+  this?.let(transform)
+```
+]
+
+---
+
+# 🪴 Functors are compositional
+
+We can write `map` for `F<G<A>>` <br />
+from the `map`s of each of them
+
+---
+
+# 🪴 Functors are compositional
+
+We can write `map` for `Map<String, Int?>` <br />
+from the `map`s of `Map<String, A>` and `A?`
+
+.code60[
+```kotlin
+fun <A, B> Map<String, A>.mapValues(...): Map<String, B>
+fun <C, D> C?.map(...): D? = this?.let(transform)
+
+fun <U, V> Map<String, U>.map(
+  transform: (U) -> V
+): Map<String, V> =
+  this.mapValues { it?.let(transform) }
+```
+]
+
+---
+
+# 🪴 Functors are compositional
+
+We can write `map` for `F<G<A>>` <br />
+from the `map`s of each of them
+
+```kotlin
+fun <A, B> F<A>.mapF(...): F<B>
+fun <C, D> G<C>.mapG(...): G<D>
+
+fun <U, V> F<G<U>>.map(
+  transform: (U) -> V
+): F<G<V>> =
+  this.mapF { it.mapG(transform) }
+```
+
+---
+
+# 🪴 Functors are compositional
+
+We can write `map` for `F<G<A>>` <br />
+from the `map`s of each of them
+
+💡 _We can derive mappers for a complex type_<br />
+&nbsp;&nbsp;&nbsp;&nbsp; _from the mappers of its components_
+
+📚 Having a large library of "basic" mappers <br />
+&nbsp;&nbsp;&nbsp;&nbsp; becomes quite useful
+
+---
+
+# 🧮 Functions are functors
+
+.code60[
+```kotlin
+fun <E, A, B> Function1<E, A>.map(
+  transform: (A) -> B
+): Function1<E, B>
+```
+]
+
+--
+
+.code60[
+```kotlin
+fun <E, A, B> ((E) -> A).map(
+  transform: (A) -> B
+): (E) -> B
+```
+]
+
+---
+
+# 🧮 Functions are functors
+
+.code60[
+```kotlin
+fun <E, A, B> Function1<E, A>.map(
+  transform: (A) -> B
+): Function1<E, B>
+```
+]
+
+.code60[
+```kotlin
+fun <E, A, B> ((E) -> A).map(
+  transform: (A) -> B
+): (E) -> B = { e: E ->
+  val a = this(e)
+  val b = transform(a)
+  b
+}
+```
+]
+
+---
+
+# 🧮 Functions are functors
+
+.code60[
+```kotlin
+fun <E, A, B> Function1<E, A>.map(
+  transform: (A) -> B
+): Function1<E, B>
+```
+]
+
+.code60[
+```kotlin
+fun <E, A, B> ((E) -> A).map(
+  transform: (A) -> B
+): (E) -> B = { e: E -> transform(this(e)) }
+```
+]
+
+Function composition! 🤗
+
+---
+
+# 🪷 Applicative
+
+Similar to functor, but for transformations <br />
+with any number of arguments <super>*</super>
+
+```kotlin
+fun <A, B, ..., Z> zip(
+  a: Whatever<A>,
+  b: Whatever<B>,
+  ...,
+  transform: (A, B, ...) -> Z
+): Whatever<Z>
+```
+
+.font60[
+<super>*</super> Actually you only need the binary case, and you can get the rest by repetition
+]
+
+---
+
+# 🪷 Examples of applicative
+
+.margin-top[
+- `Flow` follows this pattern _twice_
+]
+
+```kotlin
+fun <T1, T2, R> Flow<T1>.zip(
+  other: Flow<T2>,
+  transform: suspend (T1, T2) -> R
+): Flow<R>
+
+fun <T1, T2, R> Flow<T1>.combine(
+  flow: Flow<T2>,
+  transform: suspend (a: T1, b: T2) -> R
+): Flow<R>
+```
+
+---
+
+# 🪷 Examples of applicative
+
+.margin-top[
+- `Flow` follows this pattern _twice_
+- Lists and sets
+- Nullable types
+- Functions with a given input type
+]
+
+Not much time to dive into them ⏳
+
+> Applicatives are also compositional
+
+---
+
+# 💡 **The** idea
+
+`map` and `combine` are the basic API of `Schedule`
+
+> Let's define `Schedule` as a composition of basic blocks
+> so we can derive most implementations auto-magically
+
+> ## 🧚 🧚 🧚 🧚 🧚 🧚 🧚 🧚 🧚 🧚 🧚 🧚
+
+---
+
+# 🖼️ `Schedule` in pictures
+
+## TODO
+
+---
+
+# 📜 `Schedule` in code
+
+```kotlin
+typealias Step<Input, Output>
+  = (Input) -> Decision<Input, Output>
+```
+
+```kotlin
+sealed interface Decision<Input, Output> {
+  data class Done(val value: Output): ...
+  data class Continue(
+    val value: Output,
+    val delay: Duration,
+    val step: Step<Input, Output>
+  ): Decision<Input, Output>
+}
+```
+
+---
+
+# 📜 `Schedule` in code
+
+```kotlin
+typealias Step<Input, Output>
+  = (Input) -> Decision<Input, Output>
+```
+
+🧚 `Step` is a functor if `Decision` is!
+
+--
+
+## Is `Decision` a functor?
+
+🧚 There is a _recipe_ to build them if:
+- We have a sealed hierarchy of data classes
+- Generic `A` appears alone or in a functor
+
+---
+
+# 🍳 Recipe for functor
+
+.code60[
+```kotlin
+fun <A, B> BinaryTree<A>.map(transform: (A) -> B)
+  : BinaryTree<B> = when (this) {
+    is Leaf -> Leaf(transform(value))
+    is Node ->
+      Node(left.map(transform), right.map(transform))
+  }
+```
+
+```kotlin
+fun <I, A, B> Decision<I, A>.map(transform: (A) -> B)
+  : Decision<I, B> = when (this) {
+    is Done -> Done(transform(value))
+    is Continue -> Continue(
+      transform(value),    // apply on 'A's
+      delay,               // leave alone
+      step.map(transform)  // map on functors
+    )
+  }
+```
+]
+
+---
+
+# 🍳 Recipe for functor
+
+In Haskell the recipe is built into the compiler
+
+.code70[
+```haskell
+data BinaryTree a
+  = Leaf { value :: a }
+  | Node { left, right :: BinaryTree a}
+  deriving (Functor)
+      
+```
+]
+
+---
+
+# 🧱 Simplified `Schedule`
+
+`retry` is a loop with matching inside
+
+<iframe frameborder="0" scrolling="no" style="width:100%; height:394px;" allow="clipboard-write" src="https://emgithub.com/iframe.html?target=https%3A%2F%2Fgithub.com%2Farrow-kt%2Farrow%2Fblob%2Fmain%2Farrow-libs%2Fresilience%2Farrow-resilience%2Fsrc%2FcommonMain%2Fkotlin%2Farrow%2Fresilience%2FSchedule.kt%23L429-L445&style=atom-one-light&type=code&showBorder=on&showLineNumbers=on&showFileMeta=on&showFullPath=on&showCopy=on"></iframe>
+
+---
+
+# 🧞 Composing applicatives
+
+`Schedule` has two instances of the pattern
+
+.code60[
+```kotlin
+// delay only if both delay
+fun <I, A, B, C> fun Schedule<I, A>(
+  other: Schedule<I, B>, transform: (A, B) -> C
+): Schedule<I, C>
+
+// delay only if any of them delay
+fun <I, A, B, C> fun Schedule<I, A>(
+  other: Schedule<I, B>, transform: (A, B) -> C
+): Schedule<I, C>
+```
+]
+
+Even one more axis for _combining_ delays
+
+---
+
+class: center, middle, title-slide
+count: false
+    
+# Monadic adventures
+
+---
+
+# 🗓️ Composing `Schedule`s
+
+Execute other `Schedule` one the first is done
+
+.code70[
+```kotlin
+fun <I, A, B> Step<I, A>.andThen(
+  other: (A) -> Step<I, B>
+): Step<I, B>
+```
+]
+
+--
+
+.code70[
+```kotlin
+fun <I, A, B> ((I) -> Decision<I, A>).andThen(
+  other: (A) -> Step<I, B>
+): (I) -> Decision<I, B>
+```
+]
+
+---
+
+# 🗓️ Composing `Schedule`s
+
+Execute other `Schedule` one the first is done
+
+.code70[
+```kotlin
+fun <I, A, B> ((I) -> Decision<I, A>).andThen(
+  other: (A) -> Step<I, B>
+): (I) -> Decision<I, B> =
+  { i: Input -> this(i).andThen(other) }
+
+fun <I, A, B> Decision<I, A>.andThen(
+  other: (A) -> Step<I, B>
+): Decision<I, B> = TODO()
+```
+]
+
+---
+
+# 🌳 Monad
+
+Yet another pattern over _generic_ types
+
+```kotlin
+fun <A, B> Whatever<A>.flatMap(
+  transform: (A) -> Whatever<B>
+): Whatever<B>
+```
+
+The difference with functor is that `transform` generates another `Whatever`
+
+---
+
+# 🌳 Examples of monad
+
+.margin-top[
+- Lists (and most iterables)
+
+.code70[
+```kotlin
+fun <A, B> List<A>.flatMap(
+  transform: (A) -> List<B>
+): List<B>
+```
+]
+
+- Nullable types
+
+.code70[
+```kotlin
+fun <A, B> A?.flatMap(
+  transform: (A) -> B?
+): B? = this?.let(transform)
+```
+]
+
+]
+
+---
+
+# 🌳 Monads
+
+## Monads are **not compositional**
+
+--
+
+But there is an interesting subset <br />
+called _free monads_
+
+- Exactly one "success" or "done" case <br />
+  with one field of generic type
+- The rest of the cases mention `Whatever<A>` <br />
+  but never the generic type alone
+
+---
+
+# 🐳 Free monads
+
+.margin-top[
+- `Either` from Arrow
+]
+
+```kotlin
+sealed interface Either<E, A> {
+  data class Right<A>(val value: A): ...
+  data class Left<E>(val error: E): ...
+}
+```
+
+- `Option` and `Result`
+- Nullable types
+
+---
+
+# 🍳 Recipe for free monad
+
+.code70[
+```kotlin
+fun <A, B> BinaryTree<A>.flatMap(
+  transform: (A) -> BinaryTree<B>
+): BinaryTree<B> = when (this) {
+    is Leaf ->
+      transform(value)
+    is Node -> Node(
+      left.map(transform),
+      right.map(transform)
+    )
+  }
+```
+]
+
+--
+
+Our `Decision` is quite similar to this!
+
+---
+
+# 🎭 Conclusion
+
+1️⃣ _Algebraic_ encoding ⇒ simpler impl.
+
+- Describe as "choice of simple records"
+
+--
+
+2️⃣ Use _compositional_ patterns in your API
+
+- Powerful primitives to build others
+- Potentially free implementations
+
+---
+
+# 📖 Time for some ads...
+
+## `serranofp.com` > _Books_
+
+<table style="margin-top: 40px;">
+  <tr>
+    <td style="vertical-align: top"><img src="img/portada.png" width="280px" /></td>
+    <td style="vertical-align: top">&nbsp;&nbsp;&nbsp;&nbsp;</td>
+    <td style="vertical-align: top"><img src="img/monads.png" width="280px" /></td>
+  </tr>
+</table>
+
+---
+
+class: center, middle, title-slide
+
+# 🙋 Questions and comments
+
+---
+
+class: center, middle, title-slide
+
+# 🤩 It's been a pleasure
+
+    </textarea>
+    <script src="https://remarkjs.com/downloads/remark-latest.min.js">
+    </script>
+    <script>
+      var slideshow = remark.create();
+    </script>
+  </body>
+</html>
